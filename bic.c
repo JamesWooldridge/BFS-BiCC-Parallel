@@ -3,10 +3,11 @@
 #include <string.h>
 #include "graph.h"
 #include <time.h>
-#include "omp.h"
+// #include "omp.h"
 #include <assert.h>
 
 const int MAX_BUFFER_LENGTH = 16384;
+const int MAX_LEVELS = 1024;
 
 /**
  *	Reads the graph from the given file, and fills the arrays of source and dest vertices
@@ -79,7 +80,7 @@ int cas(int* p, int oldval, int newval) {
 /**
  *  BFS to calculate P and L arrays of the given graph
  */
-void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
+void bfs(Graph *graph, int v, int *maxDepth, int *P, int *L, int **LQ, int *LQCounts) {
     // List of vertices to visit - appended to during the search
     int *toVisit = malloc(sizeof(int) * graph->numVertices);
     toVisit[0] = v;
@@ -88,7 +89,7 @@ void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
     L[v] = 0;
 
     // start and end correspond to the start and end of a level of vertices in the toVisit list
-    int start = 0; int end = 1;
+    int start = 0; int end = 1; int level = 0;
 
     #pragma omp parallel shared(start, end)
     {
@@ -106,8 +107,16 @@ void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
 
         // When start == end, we've hit the end of the toVisit list, so everything is visited
         while(start != end) {
+        	// printf("level = %d\n", level);
             int oldEnd = end;
             int bufferSize = 0;
+
+            #pragma omp single 
+            {
+            	int size = end - start;
+            	LQ[level] = (int *) malloc(sizeof(int) * size);
+            	LQCounts[level] = size;
+        	}
 
             #pragma omp barrier
 
@@ -115,6 +124,7 @@ void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
             // Go through each vertex at this level
             for(int currV = start; currV < oldEnd; currV++) {
                 v = toVisit[currV];
+                LQ[level][abs(currV - oldEnd + 1)] = v;
 
                 // Get the offset into the edgeArray for v
                 int *adjVertices = adjacentVertices(graph, v);
@@ -125,6 +135,7 @@ void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
                     // Set the P value using CAS in case another thread got in here too
                     if(cas(&P[u], -1, v)) {
                         L[u] = L[v] + 1;
+
                         if(bufferSize < MAX_BUFFER_LENGTH) {
                             // CAS successful, room left in buffer - add u to threads buffer
                             vertexBuffer[bufferSize++] = u;
@@ -162,12 +173,14 @@ void bfs(Graph *graph, int v, int *maxDepth, int P[], int L[]) {
             {
                 // Move on to next level!
                 start = oldEnd;
+                level++;
             }
 
             #pragma omp barrier
         }
     }
 
+    *maxDepth = level;
     free(toVisit);
 }
 
@@ -183,8 +196,9 @@ void bicc(Graph *graph) {
 	int *Art = (int *) malloc(arrSize);
 	int *Low = (int *) malloc(arrSize);
 	int *Par = (int *) malloc(arrSize);
-
-	int maxDepth = 0;
+	int **LQ = (int **) malloc(sizeof(int *) * MAX_LEVELS); 
+	int *LQCounts = (int *) malloc(sizeof(int) * MAX_LEVELS); 
+	int maxDepth;
 
 	/* === 2: for all v ∈ V do === */
 	#pragma omp parallel for
@@ -203,7 +217,16 @@ void bicc(Graph *graph) {
 	int root = graph->maxDegreeVertex;
 
 	/* === 8: P, L, LQ ← BFS(G, r) === */
-	bfs(graph, root, &maxDepth, P, L);
+	bfs(graph, root, &maxDepth, P, L, LQ, LQCounts);
+
+	for(int i = 0; i < maxDepth; i++) {
+    	printf("level %d\n\t", i);
+    	printf("size: %d\n\t\t", LQCounts[i]);
+    	for(int j = 0; j < LQCounts[i]; j++) {
+    		printf("%d ", LQ[i][j]);
+    	}
+    	printf("\n");
+    }
 
 	// printf("i\tP\tL\n");
 	// for(int i = 0; i < numVertices; i++) {
