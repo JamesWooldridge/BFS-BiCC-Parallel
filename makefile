@@ -1,4 +1,4 @@
-CC = gcc -std=c99 #-fopenmp
+CC = gcc -std=c99 -fopenmp
 
 bic: bic.o graph.o
 	$(CC) -o bic bic.c graph.o
