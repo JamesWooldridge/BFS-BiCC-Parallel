@@ -17,6 +17,7 @@ Graph * initGraph(int n, int m, int *srcVerts, int *destVerts) {
 	// Initialise arrays for CSR
 	graph->avgOutDegree = 0;
 	graph->edgeArray = (int *) malloc(sizeof(int) * m);
+	graph->edgeLabels = (int *) malloc(sizeof(int) * m);
 	graph->vertexArray = (int *) malloc(sizeof(int) * (n + 1));
 	graph->maxOutDegree = 0;
 	graph->maxDegreeVertex = 0;
@@ -49,6 +50,7 @@ Graph * initGraph(int n, int m, int *srcVerts, int *destVerts) {
 		graph->edgeArray[i] = destVerts[i];
 	}
 
+
 	free(outDegrees);
 	return graph;
 }
@@ -59,6 +61,7 @@ Graph * initGraph(int n, int m, int *srcVerts, int *destVerts) {
 void destroyGraph(Graph *graph) {
 	free(graph->edgeArray);
 	free(graph->vertexArray);
+	free(graph->edgeLabels);
 	free(graph);
 }
 

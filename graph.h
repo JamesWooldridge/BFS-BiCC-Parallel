@@ -16,6 +16,7 @@ typedef struct graph {
 	int maxDegreeVertex;
 	int *edgeArray;
 	int *vertexArray;
+	int *edgeLabels;
 } Graph;
 
 /**

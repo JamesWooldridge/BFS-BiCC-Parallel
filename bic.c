@@ -3,250 +3,571 @@
 #include <string.h>
 #include "graph.h"
 #include <time.h>
-// #include "omp.h"
+#include "omp.h"
 #include <assert.h>
 
 const int MAX_BUFFER_LENGTH = 16384;
-const int MAX_LEVELS = 1024;
+const int MAX_LEVELS = 1000000;
+const int PARALLEL_CUTOFF = 10000;
 
 /**
- *	Reads the graph from the given file, and fills the arrays of source and dest vertices
- *	Each edge in the graph is represented by (srcVerts[i], destVerts[i])
+ *  Reads the graph from the given file, and fills the arrays of source and dest vertices
+ *  Each edge in the graph is represented by (srcVerts[i], destVerts[i])
  */
 Graph * parseGraphFile(char* filename) {
-	int n, m;
-	int *srcVerts, *destVerts;
-	FILE *file = fopen(filename, "r");
-	Graph *graph;
-	if(file != NULL) {
-		char line[1000];
-		int lineNum = 0, vertIndex = 0;
-		while(fgets(line, sizeof line, file) != NULL) {
-			// Strip the trailing new line character
-			size_t ln = strlen(line) - 1;
-			if(line[ln] == '\n') {
-				line[ln] = '\0';
-			}
+    int n, m;
+    int *srcVerts, *destVerts;
+    FILE *file = fopen(filename, "r");
+    Graph *graph;
+    if(file != NULL) {
+        char line[1000];
+        int lineNum = 0, vertIndex = 0;
+        while(fgets(line, sizeof line, file) != NULL) {
+            // Strip the trailing new line character
+            size_t ln = strlen(line) - 1;
+            if(line[ln] == '\n') {
+                line[ln] = '\0';
+            }
 
-			if(lineNum == 0) {
-				// First line, get n and m values
-				char *tok = strtok(line, " ");
-				n = strtol(tok, NULL, 10);
+            if(lineNum == 0) {
+                // First line, get n and m values
+                char *tok = strtok(line, " ");
+                n = strtol(tok, NULL, 10);
 
-				tok = strtok(NULL, " ");
-				m = strtol(tok, NULL, 10);
+                tok = strtok(NULL, " ");
+                m = strtol(tok, NULL, 10);
 
-				// Initialise srcVerts and destVerts to number of edges
-				srcVerts = (int *) malloc(sizeof(int) * m);
-				destVerts = (int *) malloc(sizeof(int) * m);
-			} else {
-				// Edge definition, put into src and dest arrays
-				char *tok = strtok(line, " ");
-				int src = strtol(tok, NULL, 10);
-				srcVerts[vertIndex] = src;
+                // Initialise srcVerts and destVerts to number of edges
+                srcVerts = (int *) malloc(sizeof(int) * m);
+                destVerts = (int *) malloc(sizeof(int) * m);
+            } else {
+                // Edge definition, put into src and dest arrays
+                char *tok = strtok(line, " ");
+                int src = strtol(tok, NULL, 10);
+                srcVerts[vertIndex] = src;
 
-				tok = strtok(NULL, " ");
-				int dest = strtol(tok, NULL, 10);
-				destVerts[vertIndex] = dest;
-				vertIndex++;
-			}
-			lineNum++;
-		}
-
-		// Generate the graph with the edges from the file
-		graph = initGraph(n, m, srcVerts, destVerts);
-		free(srcVerts);
-		free(destVerts);
-	}
-
-	fclose(file);
-	return graph;
-}
-
-int cas(int* p, int oldval, int newval) {
-    int ret = 0;
-    #pragma omp critical (CAS)
-    {
-        int v = *p;
-        if(v == oldval) {
-            *p = newval;
-            ret = 1;
+                tok = strtok(NULL, " ");
+                int dest = strtol(tok, NULL, 10);
+                destVerts[vertIndex] = dest;
+                vertIndex++;
+            }
+            lineNum++;
         }
+
+        // Generate the graph with the edges from the file
+        graph = initGraph(n, m, srcVerts, destVerts);
+        free(srcVerts);
+        free(destVerts);
     }
-    #pragma omp flush (p)
-    return ret;
+
+    fclose(file);
+    return graph;
 }
 
 /**
- *  BFS to calculate P and L arrays of the given graph
+ *  Parallel BFS to find P, L, and LQ values of the given graph
  */
-void bfs(Graph *graph, int v, int *maxDepth, int *P, int *L, int **LQ, int *LQCounts) {
+void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCounts, int *visited) {
+    int numThreads = omp_get_max_threads();
+
     // List of vertices to visit - appended to during the search
     int *toVisit = malloc(sizeof(int) * graph->numVertices);
-    toVisit[0] = v;
+    int back = 0;
+    int numDescendants = 0;
+    int *toVisitThreads = malloc(sizeof(int) * (numThreads * graph->numVertices));
+    int *threadOffsets = malloc(sizeof(int) * numThreads);
 
     P[v] = v;
     L[v] = 0;
+    LQ[0] = malloc(sizeof(int));
+    LQ[0][0] = v;
+    LQCounts[0] = 1;
 
-    // start and end correspond to the start and end of a level of vertices in the toVisit list
-    int start = 0; int end = 1; int level = 0;
+    toVisit[0] = v;
+    back = 1;
+    int localNumDescendants;
 
-    #pragma omp parallel shared(start, end)
+    #pragma omp parallel
     {
-        // Buffer of vertices for each thread, containing vertices to add to toVisit
-        int vertexBuffer[MAX_BUFFER_LENGTH];
-        
-        // Initialise P and L values to -1 for our visit check later
-        #pragma omp for
-        for(int curr = 0; curr < graph->numVertices; curr++) {
-            if(curr != v) {
-                P[curr] = -1;
-                L[curr] = -1;
-            }
-        }
+        int tid = omp_get_thread_num();
+        int *toVisitThread = &toVisitThreads[tid * graph->numVertices];
+        int threadOffset = 0;
+        int level = 1;
+        int prevLevel;
+        int vert, adjEnd, u;
+        int * adjVertices;
 
-        // When start == end, we've hit the end of the toVisit list, so everything is visited
-        while(start != end) {
-        	// printf("level = %d\n", level);
-            int oldEnd = end;
-            int bufferSize = 0;
+        while(back) {
+            localNumDescendants = 0;
+            threadOffset = 0;
 
-            #pragma omp single 
-            {
-            	int size = end - start;
-            	LQ[level] = (int *) malloc(sizeof(int) * size);
-            	LQCounts[level] = size;
-        	}
-
-            #pragma omp barrier
-
-            #pragma omp for
-            // Go through each vertex at this level
-            for(int currV = start; currV < oldEnd; currV++) {
-                v = toVisit[currV];
-                LQ[level][abs(currV - oldEnd + 1)] = v;
-
-                // Get the offset into the edgeArray for v
-                int *adjVertices = adjacentVertices(graph, v);
-                int adjEnd = outDegree(graph, v);
-                for(int currU = 0; currU < adjEnd; currU++) {
-                    int u = adjVertices[currU];
-
-                    // Set the P value using CAS in case another thread got in here too
-                    if(cas(&P[u], -1, v)) {
-                        L[u] = L[v] + 1;
-
-                        if(bufferSize < MAX_BUFFER_LENGTH) {
-                            // CAS successful, room left in buffer - add u to threads buffer
-                            vertexBuffer[bufferSize++] = u;
-                        } else {
-                            // CAS successful, no room in buffer - move buffer into visit list
-                            
-                            // Move shared end index so we have room to add vertices from our buffer
-                            int visitOffset = __sync_fetch_and_add(&end, MAX_BUFFER_LENGTH);
-                            assert(visitOffset + MAX_BUFFER_LENGTH <= graph->numVertices);
-                            for(int i = 0; i < MAX_BUFFER_LENGTH; i++) {
-                                // Put each vertex in our buffer into our reserved space in the visit list
-                                toVisit[visitOffset + i] = vertexBuffer[i];
+            if(graph->numVertices - numDescendants > PARALLEL_CUTOFF) {
+                // Queue big enough to parallelise
+                #pragma omp for schedule(static) reduction(+:localNumDescendants)
+                for(int i = 0; i < back; i++) {
+                    vert = toVisit[i];
+                    adjVertices = adjacentVertices(graph, vert);
+                    adjEnd = outDegree(graph, vert);
+                    // Go through each vertex adjacent to v
+                    for(int j = 0; j < adjEnd; j++) {
+                        u = adjVertices[j];
+                        if(L[u] < 0) {
+                            L[u] = level;
+                            P[u] = vert;
+                            // Add the adjacent vertex to the threads buffer
+                            toVisitThread[threadOffset++] = u;
+                            localNumDescendants++;
+                        }
+                    }
+                }
+            } else {
+                // Queue too small, only use one thread
+                #pragma omp single
+                {
+                    for(int i = 0; i < back; i++) {
+                        vert = toVisit[i];
+                        adjVertices = adjacentVertices(graph, vert);
+                        adjEnd = outDegree(graph, vert);
+                        // Go through each vertex adjacent to v
+                        for(int j = 0; j < adjEnd; j++) {
+                            u = adjVertices[j];
+                            if(L[u] < 0) {
+                                L[u] = level;
+                                P[u] = vert;
+                                // Add the adjacent vertex to the threads buffer
+                                toVisitThread[threadOffset++] = u;
+                                localNumDescendants++;
                             }
-
-                            // Buffer is empty, add this neighbour for next time
-                            vertexBuffer[0] = u;
-                            bufferSize = 1;
                         }
                     }
                 }
             }
 
-            // Check if there's things in the buffer to move into visit list
-            if(bufferSize) {
-                // Move shared end index so we have room to add vertices from our buffer
-                int visitOffset = __sync_fetch_and_add(&end, bufferSize);
-                assert(visitOffset + bufferSize <= graph->numVertices);
-                for(int i = 0; i < bufferSize; i++) {
-                    // Put each vertex in our buffer into our reserved space in the visit list
-                    toVisit[visitOffset + i] = vertexBuffer[i];
-                }
-            }
+            threadOffsets[tid] = threadOffset;
 
-            #pragma omp single 
+            #pragma omp barrier
+
+            #pragma omp single
             {
-                // Move on to next level!
-                start = oldEnd;
-                level++;
+                numDescendants = localNumDescendants;
+
+                int oldBack = back;
+                back = 0;
+                // Copy each threads buffer of vertices into main array
+                for(int i = 0; i < numThreads; i++) {
+                    if(threadOffsets[i]) {
+                        int offset = i * graph->numVertices;
+                        for(int j = 0; j < threadOffsets[i]; j++) {
+                            toVisit[back++] = toVisitThreads[offset + j];
+                        }
+                    }
+                }
+
+                // Store this level in LQ
+                LQ[level] = (int *) malloc(sizeof(int) * back);
+                for(int i = 0; i < back; i++) {
+                    LQ[level][i] = toVisit[i];
+                }
+                LQCounts[level] = back;
+                (*levels)++;
             }
+            level++;
 
             #pragma omp barrier
         }
     }
-
-    *maxDepth = level;
+    
     free(toVisit);
+    free(toVisitThreads);
+    free(threadOffsets);
 }
 
 /**
- *	Discovers the biconnected components in the given graph
+ *  Finds the articulation points of the given graph by inspecting the queues in LQ in reverse order, and 
+ *  determining Par and Low values
  */
-void bicc(Graph *graph) {
-	// Get memory for the needed arrays
-	int numVertices = graph->numVertices;
-	int arrSize = sizeof(int) * numVertices;
-	int *P = (int *) malloc(arrSize);
-	int *L = (int *) malloc(arrSize);
-	int *Art = (int *) malloc(arrSize);
-	int *Low = (int *) malloc(arrSize);
-	int *Par = (int *) malloc(arrSize);
-	int **LQ = (int **) malloc(sizeof(int *) * MAX_LEVELS); 
-	int *LQCounts = (int *) malloc(sizeof(int) * MAX_LEVELS); 
-	int maxDepth;
+void findArticulationPoints(Graph *graph, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art, int levels) {
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
 
-	/* === 2: for all v ∈ V do === */
-	#pragma omp parallel for
-	for(int i = 0; i < numVertices; i++) {
-		/* === 3: Art(v) ← false === */
-		Art[i] = 0;
-		/* === 5: Low(v) ← v === */
-		Low[i] = i;
-		/* === 6: Par(v) ← v === */
-		Par[i] = i;
-		L[i] = -1;
-        P[i] = -1;
-	}
+        // Each thread maintains it's own visited array
+        int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
+        for(int i = 0; i < graph->numVertices; i++) {
+            visited[i] = 0;
+        }
 
-	/* === 7: Select a root vertex r === */
-	int root = graph->maxDegreeVertex;
+        // Tracks the list of unique vertices encountered
+        int *Vu = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
 
-	/* === 8: P, L, LQ ← BFS(G, r) === */
-	bfs(graph, root, &maxDepth, P, L, LQ, LQCounts);
+        int maxVert = 0;
+        int stackEnd;
+        int queueEnd;
+        int nextQueueEnd;
+        int isCurrArt;
 
-	for(int i = 0; i < maxDepth; i++) {
-    	printf("level %d\n\t", i);
-    	printf("size: %d\n\t\t", LQCounts[i]);
-    	for(int j = 0; j < LQCounts[i]; j++) {
-    		printf("%d ", LQ[i][j]);
-    	}
-    	printf("\n");
+        // Lowest vertex identifier encountered
+        int vidLow;
+
+        // Inspect LQ in reverse order (LQm..1)
+        for(int level = levels - 1; level >= 1; level--) {
+            int levelSize = LQCounts[level];
+
+            #pragma omp for schedule(guided)
+            for(int uIndex = 0; uIndex < levelSize; uIndex++) {
+                int u = LQ[level][uIndex];
+                
+                if(Low[u] == -1) {
+                    // Get the parent of u
+                    int v = P[u];
+
+                    queue[0] = u;
+                    queueEnd = 1;
+                    Vu[0] = u;
+                    stackEnd = 1;
+                    visited[u] = 1;
+                    isCurrArt = 0;
+                    vidLow = u;
+
+                    while(queueEnd) {
+                        nextQueueEnd = 0;
+
+                        // For each x in Q
+                        for(int xIndex = 0; xIndex < queueEnd; xIndex++) {
+                            int x = queue[xIndex];
+                            int isXArt = Art[x];
+
+                            // For each (w, x) in E - all vertices adjacent to x
+                            int *xAdj = adjacentVertices(graph, x);
+                            int xAdjEnd = outDegree(graph, x);
+                            for(int wIndex = 0; wIndex < xAdjEnd; wIndex++) {
+                                int w = xAdj[wIndex];
+
+                                if(visited[w] || w == v) {
+                                    // This thread has already visited, or it's an edge back to parent, ignore!
+                                    continue;
+                                } else if(isXArt && Low[w] > -1) {
+                                    // Already know it's an articulation point, ignore!
+                                    continue;
+                                } else if(L[w] < L[u]) {
+                                    // Ref. lines 11 & 12, Alg. 8 (BFS-LV)
+                                    // Jump out of this BFS and set everything on the stack to unvisited
+                                    goto nextOut;
+                                } else {
+                                    // Can keep searching!
+                                    // Ref. lines 14--18, Alg. 8 (BFS-LV)
+
+                                    // Add to the next queue so we process it after everything in the current queue
+                                    nextQueue[nextQueueEnd++] = w;
+                                    Vu[stackEnd++] = w;
+                                    visited[w] = 1;
+                                    if(w < vidLow) {
+                                        vidLow = w;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Switch around queues
+                        int *tmp = nextQueue;
+                        nextQueue = queue;
+                        queue = tmp;
+                        queueEnd = nextQueueEnd;
+                    }
+
+                    // Ref. line 14 - 21, Alg. 8 (BFS-LV)
+                    Art[v] = 1;
+                    isCurrArt = 1;
+                    // For each of the unique vertices encountered
+                    for(int j = 0; j < stackEnd; j++) {
+                        int w = Vu[j];
+                        Low[w] = vidLow;
+                        Par[w] = v;
+                        visited[w] = 0;
+                    }
+
+                    nextOut:            // Label to get out of nested loop above
+                    if(!isCurrArt) {
+                        // We'll get here from the jump above when L[w] < L[u] - set everything on stack to unvisited
+                        for(int j = 0; j < stackEnd; j++) {
+                            int s = Vu[j];
+                            visited[s] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        free(visited);
+        free(Vu);
+        free(queue);
+        free(nextQueue);
+    }
+}
+
+void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art) {
+    int numThreads = omp_get_max_threads();
+
+    // List of vertices to visit - appended to during the search
+    int *toVisit = malloc(sizeof(int) * graph->numVertices);
+    int back = 0;
+    int *toVisitThreads = malloc(sizeof(int) * (numThreads * graph->numVertices));
+    int *threadOffsets = malloc(sizeof(int) * numThreads);
+    int *stack = (int *) malloc(sizeof(int) * (graph->numVertices * 2));
+    int *lows = (int *) malloc(sizeof(int) * numThreads);
+    int stackBack = 0;
+
+    int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
+    for(int i = 0; i < graph->numVertices; i++) {
+        visited[i] = 0;
     }
 
-	// printf("i\tP\tL\n");
-	// for(int i = 0; i < numVertices; i++) {
-	// 	printf("%d\t%d\t%d\n", i, P[i], L[i]);
-	// }
+    int levelSize = LQCounts[1];
+    visited[root] = 1;
+
+    for(int l = 0; l < levelSize; l++) {
+        int globalLow = graph->numVertices;
+        int v = LQ[1][l];
+        if(Low[v] == -1) {
+            printf("visiting %d\n", v);
+            toVisit[0] = v;
+            back = 1;
+            Par[v] = 0;
+            stack[0] = v;
+            stackBack = 1;
+
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int *toVisitThread = &toVisitThreads[tid * graph->numVertices];
+                int threadOffset = 0;
+                int prevLevel;
+                int vert, adjEnd, u;
+                int *adjVertices;
+                int threadLow = graph->numVertices;
+
+                while(back) {
+                    threadOffset = 0;
+
+                    if(back > PARALLEL_CUTOFF) {
+                        #pragma omp for schedule(static)
+                        for(int i = 0; i < back; i++) {
+                            vert = toVisit[i];
+                            adjEnd = outDegree(graph, vert);
+                            adjVertices = adjacentVertices(graph, vert);
+                            for(int j = 0; j < adjEnd; j++) {
+                                u = adjVertices[j];
+
+                                if(!visited[u] && Low[u] < 0) {
+                                    visited[u] = 1;
+                                    Par[u] = 0;
+                                    toVisitThread[threadOffset++] = u;
+                                    if(u < threadLow) {
+                                        threadLow = u;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        #pragma omp single
+                        {
+                            for(int i = 0; i < back; i++) {
+                                vert = toVisit[i];
+                                adjEnd = outDegree(graph, vert);
+                                adjVertices = adjacentVertices(graph, vert);
+                                for(int j = 0; j < adjEnd; j++) {
+                                    u = adjVertices[j];
+
+                                    if(!visited[u] && Low[u] < 0) {
+                                        visited[u] = 1;
+                                        Par[u] = 0;
+                                        toVisitThread[threadOffset++] = u;
+                                        if(u < threadLow) {
+                                            threadLow = u;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    threadOffsets[tid] = threadOffset;
+                    lows[tid] = threadLow;
+
+                    #pragma omp barrier
+
+                    #pragma omp single
+                    {
+                        back = 0;
+                        for(int i = 0; i < numThreads; i++) {
+                            if(lows[i] < globalLow) {
+                                globalLow = lows[i];
+                            }
+
+                            if(threadOffsets[i]) {
+                                int offset = i * graph->numVertices;
+                                for(int j = 0; j < threadOffsets[i]; j++) {
+                                    toVisit[back++] = toVisitThreads[offset + j];
+                                }
+                            }
+                        }
+
+                        for(int i = 0; i < back; i++) {
+                            stack[i + stackBack] = toVisit[i];
+                        }
+                        stackBack += back;
+                    }
+                }
+
+                #pragma omp for
+                for(int i = 0; i < stackBack; i++) {
+                    int v = stack[i];
+                    Low[v] = globalLow;
+                    visited[v] = 0;
+                }
+            }
+        }
+    }
+
+    // Deal with root
+    int end = outDegree(graph, root);
+    int *adjVertices = adjacentVertices(graph, root);
+    for(int i = 0; i < end; i++) {
+        int currLow = Low[adjVertices[i]];
+        for(int j = i + 1; j < end; j++) {
+            if(Low[adjVertices[j]] == currLow) {
+                Low[root] = currLow;
+                break;
+            }
+        }
+        if(Low[root] >= 0) {
+            break;
+        }
+    }
+
+    if(Low[root] < 0) {
+        Art[root] = 1;
+        Low[root] = root;
+    }
+
+    free(visited);
+    free(toVisit);
+    free(toVisitThreads);
+    free(stack);
+    free(threadOffsets);
+    free(lows);
+
+}
+
+/**
+ *  Labels the edges of the given graph using Par and Low values.
+ *  Edge labels are stored in the graph itself as values for each edge in the CSR representation
+ */
+void labelEdges(Graph *graph, int *Par, int *Low) {
+    #pragma omp parallel for schedule(static)
+    for(int u = 0; u < graph->numVertices; u++) {
+        int uLow = Low[u];
+        int uPar = Par[u];
+
+        int start = edgeOffset(graph, u);
+        int end = edgeOffset(graph, u + 1);
+        for(int i = start; i < end; i++) {
+            int v = graph->edgeArray[i];
+            if(Low[v] == uLow || uPar == v) {
+                graph->edgeLabels[i] = uLow;
+            } else {
+                graph->edgeLabels[i] = Low[v];
+            }
+        }
+    }
+}
+
+/**
+ *  Discovers the biconnected components in the given graph
+ */
+void bicc(Graph *graph) {
+    // Get memory for the needed arrays
+    int numVertices = graph->numVertices;
+    int arrSize = sizeof(int) * numVertices;
+    int *P = (int *) malloc(arrSize);
+    int *L = (int *) malloc(arrSize);
+    int *Art = (int *) malloc(arrSize);
+    int *Low = (int *) malloc(arrSize);
+    int *Par = (int *) malloc(arrSize);
+    int *visited = (int *) malloc(arrSize);
+    int **LQ = (int **) malloc(sizeof(int *) * MAX_LEVELS); 
+    int *LQCounts = (int *) malloc(sizeof(int) * MAX_LEVELS); 
+    int levels = 0;
+
+    // Initialise the arrays
+    #pragma omp parallel for
+    for(int i = 0; i < numVertices; i++) {
+        Art[i] = 0;
+        Low[i] = -1;
+        Par[i] = -1;
+        L[i] = -1;
+        P[i] = -1;
+        visited[i] = 0;
+    }
+
+    // Pick the vertex with the highest out degree as root
+    int root = graph->maxDegreeVertex;
+    
+    // Initial BFS to get P, L and LQ
+    bfs(graph, root, &levels, P, L, LQ, LQCounts, visited);
+
+    // BFS to discover articulation points
+    findArticulationPoints(graph, P, L, Par, Low, LQ, LQCounts, Art, levels);
+
+//    for(int i = 0; i < numVertices; i++) {
+//       if(Art[i]) printf("Articulation point: %d\n", i);
+//    }
+
+    findLowValues(graph, root, P, L, Par, Low, LQ, LQCounts, Art);
+
+//    printf("i\tP\tL\tPar\tLow\n");
+//    for(int i = 0; i < numVertices; i++) {
+//        printf("%d\t%d\t%d\t%d\t%d\n", i, P[i], L[i], Par[i], Low[i]);
+//    }
+
+    // Label the edges
+    labelEdges(graph, Par, Low);
+
+//    for(int u = 0; u < numVertices; u++) {
+//        int start = edgeOffset(graph, u);
+//        int end = edgeOffset(graph, u + 1);
+
+//        for(int i = start; i < end; i++) {
+//            int v = graph->edgeArray[i];
+//            int label = graph->edgeLabels[i];
+//            printf("(%d, %d) = %d\n", u, v, label);
+//        }
+//    }
+
+    free(P);
+    free(L);
+    free(Par);
+    free(Low);
+    free(Art);
+    free(LQ);
+    free(LQCounts);
 }
 
 int main(int argc, char *argv[]) {
-	// Check that all params are given
-	if(argc != 3) {								
-		fprintf(stderr, "Usage: ./bic graphFile outputFile\n");
-		return 1;
-	}
+    // Check that all params are given
+    if(argc != 3) {                             
+        fprintf(stderr, "Usage: ./bic graphFile outputFile\n");
+        return 1;
+    }
 
-	// Parse the input file and generate graph
-	char* filename = argv[1];
-	Graph *graph = parseGraphFile(filename);
+    // Parse the input file and generate graph
+    char* filename = argv[1];
+    Graph *graph = parseGraphFile(filename);
 
-	// Find biconnected components
-	bicc(graph);
+    // Find biconnected components
+    bicc(graph);
 
-	destroyGraph(graph);
+    destroyGraph(graph);
 }
