@@ -2,13 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "graph.h"
-#include <time.h>
 #include "omp.h"
-#include <assert.h>
 
-const int MAX_BUFFER_LENGTH = 16384;
 const int MAX_LEVELS = 1000000;
-const int PARALLEL_CUTOFF = 10000;
 
 /**
  *  Reads the graph from the given file, and fills the arrays of source and dest vertices
@@ -101,44 +97,21 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
             localNumDescendants = 0;
             threadOffset = 0;
 
-            if(graph->numVertices - numDescendants > PARALLEL_CUTOFF) {
-                // Queue big enough to parallelise
-                #pragma omp for schedule(static) reduction(+:localNumDescendants)
-                for(int i = 0; i < back; i++) {
-                    vert = toVisit[i];
-                    adjVertices = adjacentVertices(graph, vert);
-                    adjEnd = outDegree(graph, vert);
-                    // Go through each vertex adjacent to v
-                    for(int j = 0; j < adjEnd; j++) {
-                        u = adjVertices[j];
-                        if(L[u] < 0) {
-                            L[u] = level;
-                            P[u] = vert;
-                            // Add the adjacent vertex to the threads buffer
-                            toVisitThread[threadOffset++] = u;
-                            localNumDescendants++;
-                        }
-                    }
-                }
-            } else {
-                // Queue too small, only use one thread
-                #pragma omp single
-                {
-                    for(int i = 0; i < back; i++) {
-                        vert = toVisit[i];
-                        adjVertices = adjacentVertices(graph, vert);
-                        adjEnd = outDegree(graph, vert);
-                        // Go through each vertex adjacent to v
-                        for(int j = 0; j < adjEnd; j++) {
-                            u = adjVertices[j];
-                            if(L[u] < 0) {
-                                L[u] = level;
-                                P[u] = vert;
-                                // Add the adjacent vertex to the threads buffer
-                                toVisitThread[threadOffset++] = u;
-                                localNumDescendants++;
-                            }
-                        }
+            // Queue big enough to parallelise
+            #pragma omp for schedule(static) reduction(+:localNumDescendants)
+            for(int i = 0; i < back; i++) {
+                vert = toVisit[i];
+                adjVertices = adjacentVertices(graph, vert);
+                adjEnd = outDegree(graph, vert);
+                // Go through each vertex adjacent to v
+                for(int j = 0; j < adjEnd; j++) {
+                    u = adjVertices[j];
+                    if(L[u] < 0) {
+                        L[u] = level;
+                        P[u] = vert;
+                        // Add the adjacent vertex to the threads buffer
+                        toVisitThread[threadOffset++] = u;
+                        localNumDescendants++;
                     }
                 }
             }
@@ -351,43 +324,20 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
                 while(back) {
                     threadOffset = 0;
 
-                    if(back > PARALLEL_CUTOFF) {
-                        #pragma omp for schedule(static)
-                        for(int i = 0; i < back; i++) {
-                            vert = toVisit[i];
-                            adjEnd = outDegree(graph, vert);
-                            adjVertices = adjacentVertices(graph, vert);
-                            for(int j = 0; j < adjEnd; j++) {
-                                u = adjVertices[j];
+                    #pragma omp for schedule(static)
+                    for(int i = 0; i < back; i++) {
+                        vert = toVisit[i];
+                        adjEnd = outDegree(graph, vert);
+                        adjVertices = adjacentVertices(graph, vert);
+                        for(int j = 0; j < adjEnd; j++) {
+                            u = adjVertices[j];
 
-                                if(!visited[u] && Low[u] < 0) {
-                                    visited[u] = 1;
-                                    Par[u] = 0;
-                                    toVisitThread[threadOffset++] = u;
-                                    if(u < threadLow) {
-                                        threadLow = u;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        #pragma omp single
-                        {
-                            for(int i = 0; i < back; i++) {
-                                vert = toVisit[i];
-                                adjEnd = outDegree(graph, vert);
-                                adjVertices = adjacentVertices(graph, vert);
-                                for(int j = 0; j < adjEnd; j++) {
-                                    u = adjVertices[j];
-
-                                    if(!visited[u] && Low[u] < 0) {
-                                        visited[u] = 1;
-                                        Par[u] = 0;
-                                        toVisitThread[threadOffset++] = u;
-                                        if(u < threadLow) {
-                                            threadLow = u;
-                                        }
-                                    }
+                            if(!visited[u] && Low[u] < 0) {
+                                visited[u] = 1;
+                                Par[u] = 0;
+                                toVisitThread[threadOffset++] = u;
+                                if(u < threadLow) {
+                                    threadLow = u;
                                 }
                             }
                         }
