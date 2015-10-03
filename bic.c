@@ -471,30 +471,21 @@ void bicc(Graph *graph) {
     // BFS to discover articulation points
     findArticulationPoints(graph, P, L, Par, Low, LQ, LQCounts, Art, levels);
 
-//    for(int i = 0; i < numVertices; i++) {
-//       if(Art[i]) printf("Articulation point: %d\n", i);
-//    }
-
     findLowValues(graph, root, P, L, Par, Low, LQ, LQCounts, Art);
-
-//    printf("i\tP\tL\tPar\tLow\n");
-//    for(int i = 0; i < numVertices; i++) {
-//        printf("%d\t%d\t%d\t%d\t%d\n", i, P[i], L[i], Par[i], Low[i]);
-//    }
 
     // Label the edges
     labelEdges(graph, Par, Low);
 
-//    for(int u = 0; u < numVertices; u++) {
-//        int start = edgeOffset(graph, u);
-//        int end = edgeOffset(graph, u + 1);
+    for(int u = 0; u < numVertices; u++) {
+        int start = edgeOffset(graph, u);
+        int end = edgeOffset(graph, u + 1);
 
-//        for(int i = start; i < end; i++) {
-//            int v = graph->edgeArray[i];
-//            int label = graph->edgeLabels[i];
-//            printf("(%d, %d) = %d\n", u, v, label);
-//        }
-//    }
+        for(int i = start; i < end; i++) {
+            int v = graph->edgeArray[i];
+            int label = graph->edgeLabels[i];
+            printf("(%d, %d) = %d\n", u, v, label);
+        }
+    }
 
     free(P);
     free(L);
