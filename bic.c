@@ -69,7 +69,6 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
     // List of vertices to visit - appended to during the search
     int *toVisit = malloc(sizeof(int) * graph->numVertices);
     int back = 0;
-    int numDescendants = 0;
     int *toVisitThreads = malloc(sizeof(int) * (numThreads * graph->numVertices));
     int *threadOffsets = malloc(sizeof(int) * numThreads);
 
@@ -81,7 +80,13 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
 
     toVisit[0] = v;
     back = 1;
-    int localNumDescendants;
+
+    // Direction optimising BFS vars
+    double alpha = 15.0;
+    double beta = 25.0;
+    int useBottomUp = 0;
+    int nf = 0;
+    int localnf;
 
     #pragma omp parallel
     {
@@ -94,24 +99,47 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
         int * adjVertices;
 
         while(back) {
-            localNumDescendants = 0;
             threadOffset = 0;
 
-            // Queue big enough to parallelise
-            #pragma omp for schedule(static) reduction(+:localNumDescendants)
-            for(int i = 0; i < back; i++) {
-                vert = toVisit[i];
-                adjVertices = adjacentVertices(graph, vert);
-                adjEnd = outDegree(graph, vert);
-                // Go through each vertex adjacent to v
-                for(int j = 0; j < adjEnd; j++) {
-                    u = adjVertices[j];
-                    if(L[u] < 0) {
-                        L[u] = level;
-                        P[u] = vert;
-                        // Add the adjacent vertex to the threads buffer
-                        toVisitThread[threadOffset++] = u;
-                        localNumDescendants++;
+            if(!useBottomUp) {
+                /* Using top down approach */
+                #pragma omp for schedule(static) reduction(+:localnf)
+                for(int i = 0; i < back; i++) {
+                    vert = toVisit[i];
+                    adjVertices = adjacentVertices(graph, vert);
+                    adjEnd = outDegree(graph, vert);
+                    // Go through each vertex adjacent to v
+                    for(int j = 0; j < adjEnd; j++) {
+                        u = adjVertices[j];
+                        if(L[u] < 0) {
+                            L[u] = level;
+                            P[u] = vert;
+                            // Add the adjacent vertex to the threads buffer
+                            toVisitThread[threadOffset++] = u;
+                            localnf++;
+                        }
+                    }
+                }
+            } else {
+                /* Using bottom up approach */
+                prevLevel = level - 1;
+
+                #pragma omp for schedule(static) reduction(+:localnf)
+                for(int i = 0; i < graph->numVertices; i++) {
+                    vert = i;
+                    if(L[vert] < 0) {
+                        adjVertices = adjacentVertices(graph, vert);
+                        adjEnd = outDegree(graph, vert);
+                        for(int j = 0; j < adjEnd; j++) {
+                            u = adjVertices[j];
+                            if(L[u] == prevLevel) {
+                                L[vert] = level;
+                                P[vert] = u;
+                                toVisitThread[threadOffset++] = vert;
+                                localnf++;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -122,7 +150,22 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
 
             #pragma omp single
             {
-                numDescendants = localNumDescendants;
+                nf += localnf;
+
+                // Determine whether to switch BFS approaches
+                if(useBottomUp) {
+                    double mf = (double) localnf * graph->avgOutDegree;
+                    double mu = (double) (graph->numVertices - nf) * graph->avgOutDegree;
+
+                    // Switch if heuristic is true, and if we haven't switched yet
+                    if(mf > (mu / alpha) && mu > 0) {
+                        useBottomUp = 1;
+                    }
+                } else {
+                    if(nf < ((double) graph->numVertices / beta)) {
+                        useBottomUp = 0;
+                    }
+                }
 
                 int oldBack = back;
                 back = 0;
@@ -160,124 +203,110 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
  *  determining Par and Low values
  */
 void findArticulationPoints(Graph *graph, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art, int levels) {
-    #pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
+    // Each thread maintains it's own visited array
+    int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
+    for(int i = 0; i < graph->numVertices; i++) {
+        visited[i] = 0;
+    }
 
-        // Each thread maintains it's own visited array
-        int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
-        for(int i = 0; i < graph->numVertices; i++) {
-            visited[i] = 0;
-        }
+    // Tracks the list of unique vertices encountered
+    int *Vu = (int *) malloc(sizeof(int) * graph->numVertices);
+    int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
+    int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
+    int *queueWhole = (int *) malloc(sizeof(int) * graph->numVertices);
 
-        // Tracks the list of unique vertices encountered
-        int *Vu = (int *) malloc(sizeof(int) * graph->numVertices);
-        int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
-        int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
+    int maxVert = 0;
+    int stackEnd;
+    int queueEnd, queueEndWhole;
+    int nextQueueEnd;
+    int isCurrArt;
 
-        int maxVert = 0;
-        int stackEnd;
-        int queueEnd;
-        int nextQueueEnd;
-        int isCurrArt;
+    // Lowest vertex identifier encountered
+    int vidLow;
 
-        // Lowest vertex identifier encountered
-        int vidLow;
+    // Inspect LQ in reverse order (LQm..1)
+    for(int level = levels - 1; level >= 1; level--) {
+        int levelSize = LQCounts[level];
 
-        // Inspect LQ in reverse order (LQm..1)
-        for(int level = levels - 1; level >= 1; level--) {
-            int levelSize = LQCounts[level];
+        #pragma omp for schedule(guided)
+        for(int uIndex = 0; uIndex < levelSize; uIndex++) {
+            int u = LQ[level][uIndex];
+            
+            if(Low[u] == -1) {
+                // Get the parent of u
+                int v = P[u];
 
-            #pragma omp for schedule(guided)
-            for(int uIndex = 0; uIndex < levelSize; uIndex++) {
-                int u = LQ[level][uIndex];
-                
-                if(Low[u] == -1) {
-                    // Get the parent of u
-                    int v = P[u];
+                queue[0] = u;
+                queueEnd = 1;
+                Vu[0] = u;
+                stackEnd = 1;
+                visited[u] = 1;
+                isCurrArt = 0;
+                vidLow = u;
 
-                    queue[0] = u;
-                    queueEnd = 1;
-                    Vu[0] = u;
-                    stackEnd = 1;
-                    visited[u] = 1;
-                    isCurrArt = 0;
-                    vidLow = u;
+                int queueIndex = 0;
+                while(queueIndex < queueEnd) {
+                    int x = queue[queueIndex++];
 
-                    while(queueEnd) {
-                        nextQueueEnd = 0;
+                    int isXArt = Art[x];
 
-                        // For each x in Q
-                        for(int xIndex = 0; xIndex < queueEnd; xIndex++) {
-                            int x = queue[xIndex];
-                            int isXArt = Art[x];
+                    int *xAdj = adjacentVertices(graph, x);
+                    int xAdjEnd = outDegree(graph, x);
+                    for(int wIndex = 0; wIndex < xAdjEnd; wIndex++) {
+                        int w = xAdj[wIndex];
 
-                            // For each (w, x) in E - all vertices adjacent to x
-                            int *xAdj = adjacentVertices(graph, x);
-                            int xAdjEnd = outDegree(graph, x);
-                            for(int wIndex = 0; wIndex < xAdjEnd; wIndex++) {
-                                int w = xAdj[wIndex];
+                        if(visited[w] || w == v) {
+                            // This thread has already visited, or it's an edge back to parent, ignore!
+                            continue;
+                        } else if(isXArt && Low[w] > -1) {
+                            // Already know it's an articulation point, ignore!
+                            continue;
+                        } else if(L[w] < L[u]) {
+                            // Ref. lines 11 & 12, Alg. 8 (BFS-LV)
+                            // Jump out of this BFS and set everything on the stack to unvisited
+                            goto nextOut;
+                        } else {
+                            // Can keep searching!
+                            // Ref. lines 14--18, Alg. 8 (BFS-LV)
 
-                                if(visited[w] || w == v) {
-                                    // This thread has already visited, or it's an edge back to parent, ignore!
-                                    continue;
-                                } else if(isXArt && Low[w] > -1) {
-                                    // Already know it's an articulation point, ignore!
-                                    continue;
-                                } else if(L[w] < L[u]) {
-                                    // Ref. lines 11 & 12, Alg. 8 (BFS-LV)
-                                    // Jump out of this BFS and set everything on the stack to unvisited
-                                    goto nextOut;
-                                } else {
-                                    // Can keep searching!
-                                    // Ref. lines 14--18, Alg. 8 (BFS-LV)
-
-                                    // Add to the next queue so we process it after everything in the current queue
-                                    nextQueue[nextQueueEnd++] = w;
-                                    Vu[stackEnd++] = w;
-                                    visited[w] = 1;
-                                    if(w < vidLow) {
-                                        vidLow = w;
-                                    }
-                                }
+                            // Add to the next queue so we process it after everything in the current queue
+                            queue[queueEnd++] = w;
+                            Vu[stackEnd++] = w;
+                            visited[w] = 1;
+                            if(w < vidLow) {
+                                vidLow = w;
                             }
                         }
-
-                        // Switch around queues
-                        int *tmp = nextQueue;
-                        nextQueue = queue;
-                        queue = tmp;
-                        queueEnd = nextQueueEnd;
                     }
+                }
 
-                    // Ref. line 14 - 21, Alg. 8 (BFS-LV)
-                    Art[v] = 1;
-                    isCurrArt = 1;
-                    // For each of the unique vertices encountered
+                // Ref. line 14 - 21, Alg. 8 (BFS-LV)
+                Art[v] = 1;
+                isCurrArt = 1;
+                // For each of the unique vertices encountered
+                for(int j = 0; j < stackEnd; j++) {
+                    int w = Vu[j];
+                    Low[w] = vidLow;
+                    Par[w] = v;
+                    visited[w] = 0;
+                }
+
+                nextOut:            // Label to get out of nested loop above
+                if(!isCurrArt) {
+                    // We'll get here from the jump above when L[w] < L[u] - set everything on stack to unvisited
                     for(int j = 0; j < stackEnd; j++) {
-                        int w = Vu[j];
-                        Low[w] = vidLow;
-                        Par[w] = v;
-                        visited[w] = 0;
-                    }
-
-                    nextOut:            // Label to get out of nested loop above
-                    if(!isCurrArt) {
-                        // We'll get here from the jump above when L[w] < L[u] - set everything on stack to unvisited
-                        for(int j = 0; j < stackEnd; j++) {
-                            int s = Vu[j];
-                            visited[s] = 0;
-                        }
+                        int s = Vu[j];
+                        visited[s] = 0;
                     }
                 }
             }
         }
-
-        free(visited);
-        free(Vu);
-        free(queue);
-        free(nextQueue);
     }
+
+    free(visited);
+    free(Vu);
+    free(queue);
+    free(nextQueue);
 }
 
 void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art) {
@@ -300,11 +329,17 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
     int levelSize = LQCounts[1];
     visited[root] = 1;
 
+    // Direction optimising BFS vars
+    double alpha = 14.0;
+    double beta = 24.0;
+    int useBottomUp = 0;
+    int nf = 0;
+    int localnf;
+
     for(int l = 0; l < levelSize; l++) {
         int globalLow = graph->numVertices;
         int v = LQ[1][l];
         if(Low[v] == -1) {
-            printf("visiting %d\n", v);
             toVisit[0] = v;
             back = 1;
             Par[v] = 0;
@@ -324,20 +359,44 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
                 while(back) {
                     threadOffset = 0;
 
-                    #pragma omp for schedule(static)
-                    for(int i = 0; i < back; i++) {
-                        vert = toVisit[i];
-                        adjEnd = outDegree(graph, vert);
-                        adjVertices = adjacentVertices(graph, vert);
-                        for(int j = 0; j < adjEnd; j++) {
-                            u = adjVertices[j];
+                    if(!useBottomUp) {
+                        #pragma omp for schedule(static) reduction(+:localnf)
+                        for(int i = 0; i < back; i++) {
+                            vert = toVisit[i];
+                            adjEnd = outDegree(graph, vert);
+                            adjVertices = adjacentVertices(graph, vert);
+                            for(int j = 0; j < adjEnd; j++) {
+                                u = adjVertices[j];
 
-                            if(!visited[u] && Low[u] < 0) {
-                                visited[u] = 1;
-                                Par[u] = 0;
-                                toVisitThread[threadOffset++] = u;
-                                if(u < threadLow) {
-                                    threadLow = u;
+                                if(!visited[u] && Low[u] < 0) {
+                                    visited[u] = 1;
+                                    Par[u] = 0;
+                                    toVisitThread[threadOffset++] = u;
+                                    if(u < threadLow) {
+                                        threadLow = u;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        #pragma omp for schedule(static) reduction(+:localnf)
+                        for(int i = 0; i < graph->numVertices; i++) {
+                            vert = i;
+                            if(!visited[vert] && Low[vert] < 0) {
+                                adjEnd = outDegree(graph, vert);
+                                adjVertices = adjacentVertices(graph, vert);
+                                for(int j = 0; j < adjEnd; j++) {
+                                    u = adjVertices[j];
+                                    if(visited[j]) {
+                                        visited[vert] = 1;
+                                        Par[vert] = 0;
+                                        toVisitThread[threadOffset++] = vert;
+                                        if(vert < threadLow) {
+                                            threadLow = vert;
+                                        }
+                                        localnf++;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -350,6 +409,22 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
 
                     #pragma omp single
                     {
+                        nf += localnf;
+
+                        if(useBottomUp) {
+                            double mf = (double) localnf * graph->avgOutDegree;
+                            double mu = (double) (graph->numVertices - nf) * graph->avgOutDegree;
+
+                            // Switch if heuristic is true, and if we haven't switched yet
+                            if(mf > (mu / alpha) && mu > 0) {
+                                useBottomUp = 1;
+                            }
+                        } else {
+                            if(nf < ((double) graph->numVertices / beta)) {
+                                useBottomUp = 0;
+                            }
+                        }
+
                         back = 0;
                         for(int i = 0; i < numThreads; i++) {
                             if(lows[i] < globalLow) {
@@ -408,7 +483,6 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
     free(stack);
     free(threadOffsets);
     free(lows);
-
 }
 
 /**
@@ -492,14 +566,17 @@ void bicc(Graph *graph) {
     free(Par);
     free(Low);
     free(Art);
+    for(int i = 0; i < levels; i++) {
+        free(LQ[i]);
+    }
     free(LQ);
     free(LQCounts);
 }
 
 int main(int argc, char *argv[]) {
     // Check that all params are given
-    if(argc != 3) {                             
-        fprintf(stderr, "Usage: ./bic graphFile outputFile\n");
+    if(argc != 2) {                             
+        fprintf(stderr, "Usage: ./bic graphFile\n");
         return 1;
     }
 
@@ -512,3 +589,4 @@ int main(int argc, char *argv[]) {
 
     destroyGraph(graph);
 }
+
