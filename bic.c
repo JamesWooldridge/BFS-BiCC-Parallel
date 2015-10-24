@@ -210,116 +210,222 @@ void bfs(Graph *graph, int v, int *levels, int *P, int *L, int **LQ, int *LQCoun
     free(threadOffsets);
 }
 
-/**
- *  Finds the articulation points of the given graph by inspecting the queues in LQ in reverse order, and 
- *  determining Par and Low values
- */
 void findArticulationPoints(Graph *graph, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art, int levels) {
-    // Each thread maintains it's own visited array
-    int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
-    for(int i = 0; i < graph->numVertices; i++) {
-        visited[i] = 0;
-    }
+    #pragma omp parallel 
+    {
+        // Each thread maintains it's own visited array
+        int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
+        for(int i = 0; i < graph->numVertices; i++) {
+            visited[i] = 0;
+        }
 
-    // Tracks the list of unique vertices encountered
-    int *Vu = (int *) malloc(sizeof(int) * graph->numVertices);
-    int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
-    int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
-    int *queueWhole = (int *) malloc(sizeof(int) * graph->numVertices);
+        // Tracks the list of unique vertices encountered
+        int *stack = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
+        int maxVert = 0;
+        int stackBack;
+        int back;
+        int nextBack;
+        int curLow;
+        int isCurrArt;
 
-    int maxVert = 0;
-    int stackEnd;
-    int queueEnd, queueEndWhole;
-    int nextQueueEnd;
-    int isCurrArt;
+        for(int l = levels - 1; l > 1; l--) {
+            int *currQueue = LQ[l];
+            int levelSize = LQCounts[l];
 
-    // Lowest vertex identifier encountered
-    int vidLow;
+            #pragma omp for schedule(guided)
+            for(int v = 0; v < levelSize; v++) {
+                int vert = currQueue[v];
+                if(Low[vert] > -1) {
+                    continue;
+                }
 
-    // Inspect LQ in reverse order (LQm..1)
-    for(int level = levels - 1; level >= 1; level--) {
-        int levelSize = LQCounts[level];
+                int vertLevel = l;
+                int vertParent = P[vert];
 
-        #pragma omp for schedule(guided)
-        for(int uIndex = 0; uIndex < levelSize; uIndex++) {
-            int u = LQ[level][uIndex];
-            
-            if(Low[u] == -1) {
-                // Get the parent of u
-                int v = P[u];
-
-                queue[0] = u;
-                queueEnd = 1;
-                Vu[0] = u;
-                stackEnd = 1;
-                visited[u] = 1;
+                queue[0] = vert;
+                back = 1;
+                stack[0] = vert;
+                stackBack = 1;
+                visited[vert] = 1;
                 isCurrArt = 0;
-                vidLow = u;
+                curLow = graph->numVertices;
 
-                int queueIndex = 0;
-                while(queueIndex < queueEnd) {
-                    int x = queue[queueIndex++];
+                while(back) {
+                    nextBack = 0;
+                    for(int j = 0; j < back; j++) {
+                        int newVert = queue[j];
+                        int isNewArt = Art[newVert];
 
-                    int isXArt = Art[x];
+                        int *newOuts = adjacentVertices(graph, newVert);
+                        int newOutDegree = outDegree(graph, newVert);
+                        for(int n = 0; n < newOutDegree; n++) {
+                            int newOut = newOuts[n];
 
-                    int *xAdj = adjacentVertices(graph, x);
-                    int xAdjEnd = outDegree(graph, x);
-                    for(int wIndex = 0; wIndex < xAdjEnd; wIndex++) {
-                        int w = xAdj[wIndex];
-
-                        if(visited[w] || w == v) {
-                            // This thread has already visited, or it's an edge back to parent, ignore!
-                            continue;
-                        } else if(isXArt && Low[w] > -1) {
-                            // Already know it's an articulation point, ignore!
-                            continue;
-                        } else if(L[w] < L[u]) {
-                            // Ref. lines 11 & 12, Alg. 8 (BFS-LV)
-                            // Jump out of this BFS and set everything on the stack to unvisited
-                            goto nextOut;
-                        } else {
-                            // Can keep searching!
-                            // Ref. lines 14--18, Alg. 8 (BFS-LV)
-
-                            // Add to the next queue so we process it after everything in the current queue
-                            queue[queueEnd++] = w;
-                            Vu[stackEnd++] = w;
-                            visited[w] = 1;
-                            if(w < vidLow) {
-                                vidLow = w;
+                            if(visited[newOut] || newOut == vertParent) {
+                                continue;
+                            } else if(isNewArt && Low[newOut] > -1) {
+                                continue;
+                            } else if(L[newOut] < vertLevel) {
+                                goto next_out;
+                            } else {
+                                visited[newOut] = 1;
+                                nextQueue[nextBack++] = newOut;
+                                stack[stackBack++] = newOut;
+                                if(newOut < curLow) 
+                                    curLow = newOut;
                             }
                         }
                     }
+
+                    int *tmp = nextQueue;
+                    nextQueue = queue;
+                    queue = tmp;
+                    back = nextBack;
                 }
 
-                // Ref. line 14 - 21, Alg. 8 (BFS-LV)
-                Art[v] = 1;
-                numBiconnectedComponents++;
+                Art[vertParent] = 1;
                 isCurrArt = 1;
-                // For each of the unique vertices encountered
-                for(int j = 0; j < stackEnd; j++) {
-                    int w = Vu[j];
-                    Low[w] = vidLow;
-                    Par[w] = v;
-                    visited[w] = 0;
-                }
 
-                nextOut:            // Label to get out of nested loop above
-                if(!isCurrArt) {
-                    // We'll get here from the jump above when L[w] < L[u] - set everything on stack to unvisited
-                    for(int j = 0; j < stackEnd; j++) {
-                        int s = Vu[j];
-                        visited[s] = 0;
+                next_out:
+                if(isCurrArt) {
+                    for(int j = 0; j < stackBack; j++) {
+                        int sVert = stack[j];
+                        visited[sVert] = 0;
+                        Par[sVert] = vert;
+                        Low[sVert] = curLow;  
+                    }
+                } else {
+                    for(int j = 0; j < stackBack; j++) {
+                        int sVert = stack[j];
+                        visited[sVert] = 0;        
                     }
                 }
             }
         }
-    }
 
-    free(visited);
-    free(Vu);
-    free(queue);
-    free(nextQueue);
+        free(visited);
+        free(stack);
+        free(queue);
+        free(nextQueue);
+
+    }
+}
+
+/**
+ *  Finds the articulation points of the given graph by inspecting the queues in LQ in reverse order, and 
+ *  determining Par and Low values
+ */
+void findArticulationPoints2(Graph *graph, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art, int levels) {
+    #pragma omp parallel 
+    {
+        // Each thread maintains it's own visited array
+        int *visited = (int *) malloc(sizeof(int) * graph->numVertices);
+        for(int i = 0; i < graph->numVertices; i++) {
+            visited[i] = 0;
+        }
+
+        // Tracks the list of unique vertices encountered
+        int *Vu = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *queue = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *nextQueue = (int *) malloc(sizeof(int) * graph->numVertices);
+        int *queueWhole = (int *) malloc(sizeof(int) * graph->numVertices);
+
+        int maxVert = 0;
+        int stackEnd;
+        int queueEnd, queueEndWhole;
+        int nextQueueEnd;
+        int isCurrArt;
+
+        // Lowest vertex identifier encountered
+        int vidLow;
+
+        // Inspect LQ in reverse order (LQm..1)
+        for(int level = levels - 1; level >= 1; level--) {
+            int levelSize = LQCounts[level];
+
+            #pragma omp for schedule(guided)
+            for(int uIndex = 0; uIndex < levelSize; uIndex++) {
+                int u = LQ[level][uIndex];
+                
+                if(Low[u] == -1) {
+                    // Get the parent of u
+                    int v = P[u];
+
+                    queue[0] = u;
+                    queueEnd = 1;
+                    Vu[0] = u;
+                    stackEnd = 1;
+                    visited[u] = 1;
+                    isCurrArt = 0;
+                    vidLow = u;
+
+                    int queueIndex = 0;
+                    while(queueIndex < queueEnd) {
+                        int x = queue[queueIndex++];
+
+                        int isXArt = Art[x];
+
+                        int *xAdj = adjacentVertices(graph, x);
+                        int xAdjEnd = outDegree(graph, x);
+                        for(int wIndex = 0; wIndex < xAdjEnd; wIndex++) {
+                            int w = xAdj[wIndex];
+
+                            if(visited[w] || w == v) {
+                                // This thread has already visited, or it's an edge back to parent, ignore!
+                                continue;
+                            } else if(isXArt && Low[w] > -1) {
+                                // Already know it's an articulation point, ignore!
+                                continue;
+                            } else if(L[w] < L[u]) {
+                                // Ref. lines 11 & 12, Alg. 8 (BFS-LV)
+                                // Jump out of this BFS and set everything on the stack to unvisited
+                                goto nextOut;
+                            } else {
+                                // Can keep searching!
+                                // Ref. lines 14--18, Alg. 8 (BFS-LV)
+
+                                // Add to the next queue so we process it after everything in the current queue
+                                queue[queueEnd++] = w;
+                                Vu[stackEnd++] = w;
+                                visited[w] = 1;
+                                if(w < vidLow) {
+                                    vidLow = w;
+                                }
+                            }
+                        }
+                    }
+
+                    // Ref. line 14 - 21, Alg. 8 (BFS-LV)
+                    Art[v] = 1;
+                    numBiconnectedComponents++;
+                    isCurrArt = 1;
+                    // For each of the unique vertices encountered
+                    for(int j = 0; j < stackEnd; j++) {
+                        int w = Vu[j];
+                        Low[w] = vidLow;
+                        Par[w] = v;
+                        visited[w] = 0;
+                    }
+
+                    nextOut:            // Label to get out of nested loop above
+                    if(!isCurrArt) {
+                        // We'll get here from the jump above when L[w] < L[u] - set everything on stack to unvisited
+                        for(int j = 0; j < stackEnd; j++) {
+                            int s = Vu[j];
+                            visited[s] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        free(visited);
+        free(Vu);
+        free(queue);
+        free(nextQueue);
+    }
 }
 
 void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, int **LQ, int *LQCounts, int *Art) {
