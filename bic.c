@@ -294,6 +294,7 @@ void findArticulationPoints(Graph *graph, int *P, int *L, int *Par, int *Low, in
 
                 // Ref. line 14 - 21, Alg. 8 (BFS-LV)
                 Art[v] = 1;
+                numBiconnectedComponents++;
                 isCurrArt = 1;
                 // For each of the unique vertices encountered
                 for(int j = 0; j < stackEnd; j++) {
@@ -465,13 +466,6 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
                     visited[v] = 0;
                 }
             }
-
-            if(stackBack) {
-                numBiconnectedComponents++;
-                if(stackBack > maxBiconnectedComponent) {
-                    maxBiconnectedComponent = stackBack;
-                }
-            }
         }
     }
 
@@ -607,7 +601,7 @@ void bicc(Graph *graph) {
     printf("BCC_BFS %d total: %9.6lf\n", omp_get_max_threads(), elt2);
 
     printf("num bcc: %d\n", numBiconnectedComponents);
-    printf("max bcc: %d\n", maxBiconnectedComponent);
+    // printf("max bcc: %d\n", maxBiconnectedComponent);
 
     free(P);
     free(L);
