@@ -2,9 +2,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include "graph.h"
-#include "omp.h"
+#include <sys/time.h>
+// #include "omp.h"
 
 const int MAX_LEVELS = 1000000;
+
+int numBiconnectedComponents = 0;
+int maxBiconnectedComponent = 0;
+
+double timer() {
+    struct timeval tp;
+    gettimeofday(&tp, NULL);
+    return ((double) (tp.tv_sec) + 1e-6 * tp.tv_usec);
+}
+
 
 /**
  *  Reads the graph from the given file, and fills the arrays of source and dest vertices
@@ -36,6 +47,7 @@ Graph * parseGraphFile(char* filename) {
                 // Initialise srcVerts and destVerts to number of edges
                 srcVerts = (int *) malloc(sizeof(int) * m);
                 destVerts = (int *) malloc(sizeof(int) * m);
+
             } else {
                 // Edge definition, put into src and dest arrays
                 char *tok = strtok(line, " ");
@@ -453,6 +465,13 @@ void findLowValues(Graph *graph, int root, int *P, int *L, int *Par, int *Low, i
                     visited[v] = 0;
                 }
             }
+
+            if(stackBack) {
+                numBiconnectedComponents++;
+                if(stackBack > maxBiconnectedComponent) {
+                    maxBiconnectedComponent = stackBack;
+                }
+            }
         }
     }
 
@@ -512,6 +531,10 @@ void labelEdges(Graph *graph, int *Par, int *Low) {
  *  Discovers the biconnected components in the given graph
  */
 void bicc(Graph *graph) {
+    double elt, elt2;
+    elt = timer();
+    elt2 = timer();
+
     // Get memory for the needed arrays
     int numVertices = graph->numVertices;
     int arrSize = sizeof(int) * numVertices;
@@ -536,30 +559,55 @@ void bicc(Graph *graph) {
         visited[i] = 0;
     }
 
+    elt = timer() - elt;
+    printf("init time: %9.6lf\n", elt); 
+    elt = timer();
+
     // Pick the vertex with the highest out degree as root
     int root = graph->maxDegreeVertex;
     
     // Initial BFS to get P, L and LQ
     bfs(graph, root, &levels, P, L, LQ, LQCounts, visited);
 
+    elt = timer() - elt;
+    printf("BFS time: %9.6lf\n", elt);
+    elt = timer();
+
     // BFS to discover articulation points
     findArticulationPoints(graph, P, L, Par, Low, LQ, LQCounts, Art, levels);
 
+    elt = timer() - elt;
+    printf("articulation time: %9.6lf\n", elt);
+    elt = timer();
+
     findLowValues(graph, root, P, L, Par, Low, LQ, LQCounts, Art);
+
+    elt = timer() - elt;
+    printf("low values time: %9.6lf\n", elt);
+    elt = timer();
 
     // Label the edges
     labelEdges(graph, Par, Low);
 
-    for(int u = 0; u < numVertices; u++) {
-        int start = edgeOffset(graph, u);
-        int end = edgeOffset(graph, u + 1);
+    elt = timer() - elt;
+    printf("label time: %9.6lf\n", elt);
 
-        for(int i = start; i < end; i++) {
-            int v = graph->edgeArray[i];
-            int label = graph->edgeLabels[i];
-            printf("(%d, %d) = %d\n", u, v, label);
-        }
-    }
+    // for(int u = 0; u < numVertices; u++) {
+    //     int start = edgeOffset(graph, u);
+    //     int end = edgeOffset(graph, u + 1);
+
+    //     for(int i = start; i < end; i++) {
+    //         int v = graph->edgeArray[i];
+    //         int label = graph->edgeLabels[i];
+    //         printf("(%d, %d) = %d\n", u, v, label);
+    //     }
+    // }
+
+    elt2 = timer() - elt2;
+    printf("BCC_BFS %d total: %9.6lf\n", omp_get_max_threads(), elt2);
+
+    printf("num bcc: %d\n", numBiconnectedComponents);
+    printf("max bcc: %d\n", maxBiconnectedComponent);
 
     free(P);
     free(L);
